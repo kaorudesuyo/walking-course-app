@@ -9,6 +9,7 @@ import CheckpointList from "@/components/CheckpointList";
 import MapAppButtons from "@/components/MapAppButtons";
 import ShareButton from "@/components/ShareButton";
 import CourseMap from "@/components/CourseMap";
+import CalorieDisplay from "@/components/CalorieDisplay";
 
 const TYPE_LABEL: Record<string, string> = {
   nature: "Nature", historical: "Historical", town: "Town",
@@ -116,6 +117,11 @@ export default function CourseDetailPage() {
               </span>
             ))}
           </div>
+        </div>
+
+        {/* Calories & Steps */}
+        <div className="anim-fade-up anim-delay-1" style={{ marginBottom: 40 }}>
+          <CalorieDisplay distanceKm={course.distanceKm} durationMin={course.durationMin} />
         </div>
 
         <hr className="divider" style={{ marginBottom: 40 }} />

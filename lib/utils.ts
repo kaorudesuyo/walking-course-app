@@ -118,3 +118,34 @@ export function encodeCourseToUrl(course: {
   });
   return btoa(encodeURIComponent(data));
 }
+
+// ─────────────────────────────────────────────────────
+// 歩数・カロリー計算
+// ─────────────────────────────────────────────────────
+
+/** 歩数 → 距離(km)  1歩 = 約0.75m（成人平均歩幅） */
+export function stepsToDistance(steps: number): number {
+  return parseFloat((steps * 0.75 / 1000).toFixed(2));
+}
+
+/** 距離(km) → 歩数 */
+export function distanceToSteps(distanceKm: number): number {
+  return Math.round(distanceKm * 1000 / 0.75);
+}
+
+/** 距離(km) → 歩行時間(分) [Googleマップ基準 3.87km/h] */
+export function distanceToMinutes(distanceKm: number): number {
+  return Math.round((distanceKm / 3.87) * 60);
+}
+
+/**
+ * 消費カロリー計算 (kcal)
+ * 計算式: METs × 体重(kg) × 時間(h)
+ * 平地ウォーキングのMETs = 3.5
+ * 例: 60kg × 30分 × 2.4km → 約70kcal
+ */
+export function calcCalories(distanceKm: number, weightKg: number): number {
+  const METS = 3.5;
+  const hours = distanceKm / 3.87;
+  return Math.round(METS * weightKg * hours);
+}
