@@ -1,0 +1,167 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,300;1,400&family=Jost:wght@200;300;400;500&family=Noto+Serif+JP:wght@200;300;400&display=swap');
+
+/* ── DESIGN TOKENS (kaoru-furubayashi.com準拠) ─────────────── */
+:root {
+  --bg:        #0a0a0a;
+  --bg2:       #111111;
+  --border:    rgba(255,255,255,0.12);
+  --white:     #ffffff;
+  --muted:     rgba(255,255,255,0.50);
+  --accent:    rgba(255,255,255,0.06);
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { scroll-behavior: smooth; font-size: 16px; }
+
+body {
+  background: var(--bg);
+  color: var(--white);
+  font-family: 'Jost', 'Noto Serif JP', sans-serif;
+  font-weight: 300;
+  letter-spacing: 0.04em;
+  line-height: 1.8;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.18); border-radius: 2px; }
+
+/* ── ANIMATIONS ─────────────────────────── */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
+@keyframes spin  { to { transform: rotate(360deg); } }
+
+.anim-fade-up { animation: fadeUp 0.55s ease both; }
+.anim-delay-1 { animation-delay: 0.08s; }
+.anim-delay-2 { animation-delay: 0.16s; }
+.anim-delay-3 { animation-delay: 0.24s; }
+
+/* ── UTILITY CLASSES ────────────────────── */
+.label {
+  font-family: 'Jost', sans-serif;
+  font-size: 0.68rem;
+  font-weight: 400;
+  letter-spacing: 0.38em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.section-label {
+  font-family: 'Jost', sans-serif;
+  font-size: 0.68rem;
+  letter-spacing: 0.38em;
+  color: var(--muted);
+  text-transform: uppercase;
+  margin-bottom: 2.4rem;
+  font-weight: 400;
+}
+
+.heading {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: clamp(1.8rem, 5vw, 2.8rem);
+  font-weight: 300;
+  letter-spacing: 0.04em;
+  color: var(--white);
+}
+
+/* ── BUTTONS ────────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-family: 'Jost', sans-serif;
+  font-size: 0.72rem;
+  font-weight: 400;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  border: none;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.btn:active { transform: scale(0.98); }
+
+.btn-white {
+  background: var(--white);
+  color: var(--bg);
+  padding: 14px 32px;
+}
+.btn-white:hover { background: rgba(255,255,255,0.88); }
+.btn-white:disabled { opacity: 0.3; cursor: not-allowed; }
+
+.btn-outline {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  padding: 13px 32px;
+}
+.btn-outline:hover { color: var(--white); border-color: rgba(255,255,255,0.4); }
+
+.btn-ghost {
+  background: transparent;
+  color: var(--muted);
+  padding: 8px 0;
+  font-size: 0.68rem;
+  letter-spacing: 0.2em;
+}
+.btn-ghost:hover { color: var(--white); }
+
+/* ── SURFACES ───────────────────────────── */
+.surface {
+  background: var(--accent);
+  border: 1px solid var(--border);
+}
+
+/* ── TAG / BADGE ────────────────────────── */
+.tag {
+  font-family: 'Jost', sans-serif;
+  font-size: 0.62rem;
+  letter-spacing: 0.18em;
+  padding: 0.3rem 0.85rem;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  text-transform: uppercase;
+  font-weight: 300;
+  transition: color 0.25s, border-color 0.25s;
+}
+.tag:hover { color: var(--white); border-color: rgba(255,255,255,0.4); }
+
+/* ── INPUT ──────────────────────────────── */
+.input {
+  background: var(--accent);
+  border: 1px solid var(--border);
+  color: var(--white);
+  font-family: 'Jost', sans-serif;
+  font-size: 0.88rem;
+  font-weight: 300;
+  letter-spacing: 0.04em;
+  padding: 12px 16px;
+  width: 100%;
+  outline: none;
+  transition: border-color 0.25s;
+}
+.input::placeholder { color: var(--muted); }
+.input:focus { border-color: rgba(255,255,255,0.4); }
+
+/* ── DIVIDER ────────────────────────────── */
+.divider { border: none; border-top: 1px solid var(--border); }
+
+/* ── RESPONSIVE ─────────────────────────── */
+@media (max-width: 768px) {
+  html { font-size: 14px; }
+}
+@media (max-width: 480px) {
+  html { font-size: 13px; }
+}
