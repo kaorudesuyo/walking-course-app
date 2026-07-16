@@ -1,1 +1,15 @@
-{"name":"ウォーキングコース提案","short_name":"Walk","start_url":"/","display":"standalone","background_color":"#0a0a0a","theme_color":"#0a0a0a"}
+{
+  "name": "ウォーキングコース提案",
+  "short_name": "Walk",
+  "description": "現在地からあなただけのウォーキングコースを無料提案",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0a",
+  "theme_color": "#0a0a0a",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

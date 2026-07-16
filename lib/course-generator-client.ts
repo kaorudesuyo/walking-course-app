@@ -1,4 +1,21 @@
-// クライアントサイドでコース生成（外部APIをブラウザから直接呼び出す）
+// ============================================================
+// ウォーキングコース生成エンジン v3
+//
+// 【設計方針】
+// ① 扇形分割（セクター法）: 出発地を中心に360°をチェックポイント数で
+//    等分し、各扇形から最良スポットを1つずつ選ぶ。
+//    → スポットが円状に分散し、構造的に「周回ループ」になる。
+// ② 重複走行率の実測: OSRMのルート座標列を約11mグリッドで解析し、
+//    同じ道を2回通った距離の割合を計算。閾値(30%)超過なら扇形を
+//    回転させた別候補で再試行し、重複が最少のルートを採用。
+//    → 「同じ道の折り返し」を定量的に排除。
+// ③ コース間の差別化: コースを順次生成し、使用済みスポットに大幅減点、
+//    かつコースごとに扇形の回転角をずらす。
+//    → 3コースが別方向・別スポットの明確に異なるルートになる。
+// ④ 双方向の時間フィッティング: 長すぎればスコア最低スポットを削除、
+//    短すぎれば最大の角度ギャップに新スポットを追加して再計算。
+//    → 指定時間±15%以内に収束させる。
+// ============================================================
 
 import type { Course, CourseType, Checkpoint, Difficulty } from "@/types/course";
 import type { SpotInfo, SpotCategory } from "./overpass";
@@ -10,123 +27,227 @@ import {
 import { fetchNearbySpotsClient, calculateRouteClient, reverseGeocodeClient } from "./client-api";
 
 // ── 定数 ──────────────────────────────────────────────────
-const WALK_KM_PER_MIN = 3.87 / 60; // Googleマップ実測速度
-const DETOUR_FACTOR   = 1.25;       // 道路距離 = 直線 × 1.25
-const TOLERANCE       = 0.15;       // 許容誤差 ±15%
+const WALK_KM_PER_MIN = 3.87 / 60;   // Googleマップ実測速度
+const DETOUR_FACTOR   = 1.25;        // 道路距離 ≒ 直線 × 1.25
+const TIME_HI         = 1.15;        // 時間の上限許容 (+15%)
+const TIME_LO         = 0.80;        // 時間の下限許容 (-20%)
+const OVERLAP_OK      = 0.30;        // 重複走行率がこれ以下なら良質なループ
+const MAX_ROUTE_CALLS = 5;           // 1コースあたりのOSRM呼び出し上限
 
-// ── ループ半径・探索半径 ───────────────────────────────────
-function loopRadius(durationMin: number): number {
-  const totalRoadKm = durationMin * WALK_KM_PER_MIN;
-  return totalRoadKm / (2 * Math.PI * DETOUR_FACTOR);
-}
-function searchRadius(durationMin: number): number {
-  const totalRoadKm = durationMin * WALK_KM_PER_MIN;
-  return (totalRoadKm / 2) / DETOUR_FACTOR;
-}
+const TWO_PI = Math.PI * 2;
 
-// ── 方向角 ────────────────────────────────────────────────
+// ── 幾何ユーティリティ ─────────────────────────────────────
+function toRad(deg: number) { return (deg * Math.PI) / 180; }
+
+/** 出発地から見たスポットの方向角 (0〜2π) */
 function bearing(oLat: number, oLng: number, lat: number, lng: number): number {
   const dLng = toRad(lng - oLng);
   const y = Math.sin(dLng) * Math.cos(toRad(lat));
   const x = Math.cos(toRad(oLat)) * Math.sin(toRad(lat))
           - Math.sin(toRad(oLat)) * Math.cos(toRad(lat)) * Math.cos(dLng);
-  return Math.atan2(y, x);
-}
-function toRad(deg: number) { return (deg * Math.PI) / 180; }
-function angleDiff(a: number, b: number): number {
-  let d = a - b;
-  while (d >  Math.PI) d -= 2 * Math.PI;
-  while (d < -Math.PI) d += 2 * Math.PI;
-  return Math.abs(d);
+  return normalizeAngle(Math.atan2(y, x));
 }
 
-// ── スコアリング ──────────────────────────────────────────
+function normalizeAngle(a: number): number {
+  while (a < 0) a += TWO_PI;
+  while (a >= TWO_PI) a -= TWO_PI;
+  return a;
+}
+
+/** ループの理想半径(km): 総距離を円周とみなした半径 */
+function loopRadius(durationMin: number): number {
+  return (durationMin * WALK_KM_PER_MIN) / (TWO_PI * DETOUR_FACTOR);
+}
+/** スポット探索の最大直線距離(km): 片道で到達できる上限 */
+function searchRadius(durationMin: number): number {
+  return (durationMin * WALK_KM_PER_MIN / 2) / DETOUR_FACTOR;
+}
+/** 時間に応じたチェックポイント数 */
+function targetSpotCount(durationMin: number): number {
+  return durationMin <= 20 ? 2 : durationMin <= 40 ? 3 : durationMin <= 70 ? 4 : 5;
+}
+
+// ── スポット候補 ──────────────────────────────────────────
+interface Cand {
+  s: SpotInfo;
+  score: number;
+  ang: number;   // 出発地からの方向角
+  dist: number;  // 出発地からの直線距離(km)
+}
+
+/**
+ * スポットの基礎スコア。
+ * usedIds（他コースで使用済み）は -0.55 の大幅減点 → 実質ほぼ除外され、
+ * 代替がない場合のみ再利用される（スポットが少ない地域でも全コース生成可能）。
+ */
 function scoreSpot(
-  spot: SpotInfo, oLat: number, oLng: number,
-  maxR: number, loopR: number, preferred: SpotCategory[]
+  spot: SpotInfo, dist: number,
+  loopR: number, maxR: number,
+  preferred: SpotCategory[], usedIds: Set<string>
 ): number {
-  const dist = haversineDistance(oLat, oLng, spot.lat, spot.lng);
   if (dist < 0.05 || dist > maxR) return -1;
-  const idealLo = loopR * 0.5, idealHi = loopR * 1.1;
+  const idealLo = loopR * 0.6, idealHi = loopR * 1.4;
   const distScore =
-    dist < idealLo ? dist / idealLo * 0.6 :
+    dist < idealLo ? (dist / idealLo) * 0.6 :
     dist <= idealHi ? 1.0 :
-    Math.max(0.2, 1 - (dist - idealHi) / (maxR - idealHi) * 0.8);
+    Math.max(0.15, 1 - (dist - idealHi) / Math.max(maxR - idealHi, 0.01) * 0.85);
   const catScore  = (CATEGORY_WEIGHT[spot.category] ?? 5) / 10;
-  const prefBonus = preferred.includes(spot.category) ? 0.25 : 0;
-  const hasJaName = /[\u3040-\u30ff\u4e00-\u9fff]/.test(spot.name) ? 0.08 : 0;
-  return distScore * 0.45 + catScore * 0.28 + prefBonus * 0.19 + hasJaName * 0.08;
+  const prefBonus = preferred.includes(spot.category) ? 0.30 : 0;
+  const jaBonus   = /[\u3040-\u30ff\u4e00-\u9fff]/.test(spot.name) ? 0.06 : 0;
+  const usedPenalty = usedIds.has(spot.id) ? 0.55 : 0;
+  return distScore * 0.40 + catScore * 0.28 + prefBonus * 0.20 + jaBonus * 0.12 - usedPenalty;
 }
 
-// ── ループ順序付け ────────────────────────────────────────
-function orderAsLoop(spots: SpotInfo[], oLat: number, oLng: number, scores: Map<string, number>): SpotInfo[] {
-  if (spots.length <= 1) return spots;
-  const withAngle = spots.map(s => ({ spot: s, angle: bearing(oLat, oLng, s.lat, s.lng), score: scores.get(s.id) ?? 0 }));
-  const best = withAngle.reduce((a, b) => a.score > b.score ? a : b);
-  const startAngle = best.angle;
-  withAngle.sort((a, b) => {
-    let da = a.angle - startAngle, db = b.angle - startAngle;
-    if (da < 0) da += 2 * Math.PI;
-    if (db < 0) db += 2 * Math.PI;
-    return da - db;
-  });
-  return withAngle.map(x => x.spot);
-}
-
-// ── チェックポイント選択 ──────────────────────────────────
-function selectCheckpoints(spots: SpotInfo[], oLat: number, oLng: number, durationMin: number, type: CourseType): SpotInfo[] {
-  const maxR = searchRadius(durationMin);
+function buildCandidates(
+  spots: SpotInfo[], oLat: number, oLng: number,
+  durationMin: number, type: CourseType, usedIds: Set<string>
+): Cand[] {
   const loopR = loopRadius(durationMin);
+  const maxR  = searchRadius(durationMin);
   const preferred = TYPE_PREFERRED_CATEGORIES[type];
-  const scoreMap = new Map<string, number>();
-  const candidates = spots
-    .map(s => { const score = scoreSpot(s, oLat, oLng, maxR, loopR, preferred); scoreMap.set(s.id, score); return { spot: s, score }; })
-    .filter(x => x.score >= 0)
-    .sort((a, b) => b.score - a.score)
-    .map(x => x.spot);
-  if (candidates.length === 0) return [];
-  const maxSpots = durationMin <= 20 ? 2 : durationMin <= 40 ? 3 : durationMin <= 70 ? 4 : 5;
-  const minAngleDiff = Math.PI / 6;
-  const selected: SpotInfo[] = [];
-  const selectedAngles: number[] = [];
-  for (const spot of candidates) {
-    if (selected.length >= maxSpots) break;
-    if (selected.some(s => haversineDistance(s.lat, s.lng, spot.lat, spot.lng) < 0.15)) continue;
-    const angle = bearing(oLat, oLng, spot.lat, spot.lng);
-    if (selected.length >= 1 && selectedAngles.some(a => angleDiff(angle, a) < minAngleDiff)) continue;
-    selected.push(spot);
-    selectedAngles.push(angle);
-  }
-  return orderAsLoop(selected, oLat, oLng, scoreMap);
+  return spots
+    .map(s => {
+      const dist = haversineDistance(oLat, oLng, s.lat, s.lng);
+      return {
+        s,
+        dist,
+        score: scoreSpot(s, dist, loopR, maxR, preferred, usedIds),
+        ang: bearing(oLat, oLng, s.lat, s.lng),
+      };
+    })
+    .filter(c => c.score >= 0);
 }
 
-// ── ルート検証・時間調整 ──────────────────────────────────
-async function validateRoute(
-  candidateSpots: SpotInfo[], oLat: number, oLng: number, durationMin: number
-): Promise<{ spots: SpotInfo[]; distanceKm: number; actualMin: number; geometry: GeoJSON.LineString | undefined }> {
-  const hi = durationMin * (1 + TOLERANCE);
-  let spots = [...candidateSpots];
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const routePoints = [
+// ── ① 扇形分割によるスポット選択 ──────────────────────────
+/**
+ * 360°を numTarget 個の扇形に分割し、各扇形から最良スポットを1つ選ぶ。
+ * offset により扇形の境界を回転できる（コース差別化・再試行に使用）。
+ */
+function selectBySectors(cands: Cand[], numTarget: number, offset: number): Cand[] {
+  const sectorSize = TWO_PI / numTarget;
+  const chosen: Cand[] = [];
+  for (let k = 0; k < numTarget; k++) {
+    const lo = normalizeAngle(offset + k * sectorSize);
+    const inSector = cands.filter(c => normalizeAngle(c.ang - lo) < sectorSize);
+    const eligible = inSector.filter(c =>
+      !chosen.some(ch =>
+        ch.s.id === c.s.id ||
+        haversineDistance(ch.s.lat, ch.s.lng, c.s.lat, c.s.lng) < 0.12
+      )
+    );
+    if (eligible.length === 0) continue; // 空の扇形はスキップ（ループは維持される）
+    eligible.sort((a, b) => b.score - a.score);
+    chosen.push(eligible[0]);
+  }
+  // 方向角順に並べ替え → 円を描く訪問順序
+  chosen.sort((a, b) => normalizeAngle(a.ang - offset) - normalizeAngle(b.ang - offset));
+  return chosen;
+}
+
+// ── ② 重複走行率の実測 ────────────────────────────────────
+/**
+ * ルート座標列の各セグメントを約11mグリッド（小数4桁）のキーに変換し、
+ * 同じ道路区間を2回以上通った距離の割合を返す。
+ * 0.0 = 完全な周回 / 1.0 = 完全な往復
+ */
+function measureOverlap(geometry: GeoJSON.LineString): number {
+  const coords = geometry.coordinates;
+  if (!coords || coords.length < 3) return 0;
+  const seen = new Set<string>();
+  let dup = 0, total = 0;
+  for (let i = 0; i < coords.length - 1; i++) {
+    const [lng1, lat1] = coords[i];
+    const [lng2, lat2] = coords[i + 1];
+    const len = haversineDistance(lat1, lng1, lat2, lng2);
+    total += len;
+    const ka = `${lat1.toFixed(4)},${lng1.toFixed(4)}`;
+    const kb = `${lat2.toFixed(4)},${lng2.toFixed(4)}`;
+    const key = ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`; // 無向キー（逆走も検出）
+    if (seen.has(key)) dup += len;
+    else seen.add(key);
+  }
+  return total > 0 ? dup / total : 0;
+}
+
+// ── ④ 時間フィッティング用ヘルパー ────────────────────────
+/** 最大の角度ギャップ内にある最良スポットを返す（コースが短すぎるときの追加用） */
+function findGapSpot(chosen: Cand[], cands: Cand[]): Cand | null {
+  if (chosen.length === 0) return null;
+  const angles = chosen.map(c => c.ang).sort((a, b) => a - b);
+  let gapStart = 0, gapSize = 0;
+  for (let i = 0; i < angles.length; i++) {
+    const a = angles[i];
+    const b = i === angles.length - 1 ? angles[0] + TWO_PI : angles[i + 1];
+    if (b - a > gapSize) { gapSize = b - a; gapStart = a; }
+  }
+  // ギャップの中央60%に入るスポットのみ（既存スポットに近い方向を避ける）
+  const eligible = cands.filter(c => {
+    if (chosen.some(ch => ch.s.id === c.s.id)) return false;
+    if (chosen.some(ch => haversineDistance(ch.s.lat, ch.s.lng, c.s.lat, c.s.lng) < 0.12)) return false;
+    const rel = normalizeAngle(c.ang - gapStart);
+    return rel > gapSize * 0.2 && rel < gapSize * 0.8;
+  });
+  if (eligible.length === 0) return null;
+  eligible.sort((a, b) => b.score - a.score);
+  return eligible[0];
+}
+
+interface RouteEval {
+  chosen: Cand[];
+  distanceKm: number;
+  actualMin: number;
+  overlap: number;
+  geometry: GeoJSON.LineString;
+}
+
+/**
+ * 選択スポットでループルートを計算し、時間が合うまで追加・削除を繰り返す。
+ * budget.remaining でOSRM呼び出し回数を制御。
+ */
+async function routeAndFit(
+  initial: Cand[], cands: Cand[],
+  oLat: number, oLng: number, target: number,
+  offset: number, budget: { remaining: number }
+): Promise<RouteEval | null> {
+  let chosen = [...initial];
+  let result: RouteEval | null = null;
+
+  while (budget.remaining > 0 && chosen.length >= 1) {
+    const pts = [
       { lat: oLat, lng: oLng },
-      ...spots.map(s => ({ lat: s.lat, lng: s.lng })),
+      ...chosen.map(c => ({ lat: c.s.lat, lng: c.s.lng })),
       { lat: oLat, lng: oLng }, // ループ: 出発地に戻る
     ];
-    const route = await calculateRouteClient(routePoints);
+    const route = await calculateRouteClient(pts);
+    budget.remaining--;
     if (!route) break;
+
     const distanceKm = parseFloat((route.distanceMeters / 1000).toFixed(1));
     const actualMin  = Math.round((distanceKm / 3.87) * 60); // Googleマップ基準
-    if (actualMin <= hi) return { spots, distanceKm, actualMin, geometry: route.geometry };
-    if (spots.length > 1) { spots = spots.slice(0, -1); }
-    else {
-      const trimDist = parseFloat((durationMin * WALK_KM_PER_MIN).toFixed(1));
-      return { spots, distanceKm: trimDist, actualMin: durationMin, geometry: route.geometry };
+    result = { chosen: [...chosen], distanceKm, actualMin, overlap: measureOverlap(route.geometry), geometry: route.geometry };
+
+    if (actualMin > target * TIME_HI && chosen.length > 1) {
+      // 長すぎ → スコア最低のスポットを削除して再計算
+      let worstIdx = 0;
+      for (let i = 1; i < chosen.length; i++) if (chosen[i].score < chosen[worstIdx].score) worstIdx = i;
+      chosen.splice(worstIdx, 1);
+      continue;
     }
+    if (actualMin < target * TIME_LO && budget.remaining > 0) {
+      // 短すぎ → 最大ギャップにスポットを追加して再計算
+      const add = findGapSpot(chosen, cands);
+      if (add) {
+        chosen.push(add);
+        chosen.sort((a, b) => normalizeAngle(a.ang - offset) - normalizeAngle(b.ang - offset));
+        continue;
+      }
+    }
+    break; // 時間が許容範囲内、または調整手段がない
   }
-  const fallbackDist = parseFloat((durationMin * WALK_KM_PER_MIN).toFixed(1));
-  return { spots, distanceKm: fallbackDist, actualMin: durationMin, geometry: undefined };
+  return result;
 }
 
+// ── その他ヘルパー ────────────────────────────────────────
 function estimateDifficulty(distanceKm: number): Difficulty {
   if (distanceKm < 2.5) return "flat";
   if (distanceKm < 5.0) return "moderate";
@@ -140,16 +261,42 @@ function categoryDescription(cat: SpotCategory): string {
   };
   return map[cat] ?? "";
 }
+function timeValid(r: RouteEval, target: number): boolean {
+  return r.actualMin <= target * TIME_HI;
+}
 
-// ── 単一コース生成 ────────────────────────────────────────
+// ── ③ 単一コース生成（差別化オフセット付き）────────────────
 async function buildOneCourse(
-  type: CourseType, spots: SpotInfo[], oLat: number, oLng: number, durationMin: number
+  type: CourseType, spots: SpotInfo[],
+  oLat: number, oLng: number, target: number,
+  usedIds: Set<string>, offsetBase: number
 ): Promise<Course | null> {
-  const candidateSpots = selectCheckpoints(spots, oLat, oLng, durationMin, type);
-  if (candidateSpots.length < 1) return null;
-  const { spots: finalSpots, distanceKm, actualMin, geometry } =
-    await validateRoute(candidateSpots, oLat, oLng, durationMin);
-  if (finalSpots.length === 0) return null;
+  const numTarget = targetSpotCount(target);
+  const sectorSize = TWO_PI / numTarget;
+  const cands = buildCandidates(spots, oLat, oLng, target, type, usedIds);
+  if (cands.length === 0) return null;
+
+  const budget = { remaining: MAX_ROUTE_CALLS };
+  let best: RouteEval | null = null;
+
+  // 基本オフセット → 重複が多ければ扇形を半回転させた別候補で再試行
+  for (const off of [offsetBase, offsetBase + sectorSize / 2]) {
+    if (budget.remaining <= 0) break;
+    const sel = selectBySectors(cands, numTarget, normalizeAngle(off));
+    if (sel.length < 1) continue;
+    const res = await routeAndFit(sel, cands, oLat, oLng, target, normalizeAngle(off), budget);
+    if (!res) continue;
+    if (timeValid(res, target)) {
+      if (!best || !timeValid(best, target) || res.overlap < best.overlap) best = res;
+      if (best.overlap <= OVERLAP_OK) break; // 十分に良質な周回ループ → 確定
+    } else if (!best) {
+      best = res; // 時間超過しか得られない場合の保険
+    }
+  }
+
+  if (!best || best.chosen.length === 0) return null;
+
+  const finalSpots = best.chosen.map(c => c.s);
   const checkpoints: Checkpoint[] = [
     { order: 1, name: "出発地点", lat: oLat, lng: oLng, description: "スタート / ゴール", isStart: true },
     ...finalSpots.map((s, i) => ({
@@ -158,17 +305,24 @@ async function buildOneCourse(
     })),
     { order: finalSpots.length + 2, name: "出発地点へ戻る", lat: oLat, lng: oLng, description: "ゴール", isGoal: true },
   ];
+
+  // このコースが使ったスポットを記録 → 次のコースは別スポットを選ぶ
+  for (const s of finalSpots) usedIds.add(s.id);
+
   const spotNames  = finalSpots.map(s => s.name);
   const categories = finalSpots.map(s => s.category);
+
   return {
     id: generateId(type), type,
     name: buildCourseName(type, spotNames[0]),
-    distanceKm, durationMin: actualMin,
-    difficulty: estimateDifficulty(distanceKm),
+    distanceKm: best.distanceKm,
+    durationMin: best.actualMin,
+    difficulty: estimateDifficulty(best.distanceKm),
     tags: inferTags(categories),
-    description: buildCourseDescription(type, spotNames, actualMin, distanceKm),
+    description: buildCourseDescription(type, spotNames, best.actualMin, best.distanceKm),
     bestTime: COURSE_BEST_TIME[type],
-    checkpoints, routeGeoJson: geometry,
+    checkpoints,
+    routeGeoJson: best.geometry,
   };
 }
 
@@ -178,37 +332,41 @@ export interface GenerateResult {
   courses: Course[];
 }
 
+const COURSE_TYPES: CourseType[] = ["nature", "historical", "town"];
+const TYPE_PROGRESS: Record<CourseType, string> = {
+  nature: "自然コースを構築中...",
+  historical: "歴史コースを構築中...",
+  town: "街歩きコースを構築中...",
+};
+
 export async function generateCoursesClient(
   lat: number, lng: number, durationMin: number,
   onProgress?: (msg: string) => void
 ): Promise<GenerateResult> {
   onProgress?.("エリアをスキャン中...");
+  const radiusMeters = Math.round(searchRadius(durationMin) * 1000);
 
-  // 検索半径計算
-  const totalRoadKm = durationMin * WALK_KM_PER_MIN;
-  const radiusMeters = Math.round((totalRoadKm / 2) / DETOUR_FACTOR * 1000);
-
-  // 並行取得
   onProgress?.("スポットを収集中...");
   const [spots, areaName] = await Promise.all([
     fetchNearbySpotsClient(lat, lng, radiusMeters),
     reverseGeocodeClient(lat, lng),
   ]);
-
   if (spots.length < 2) throw new Error("周辺にスポットが見つかりませんでした。別の場所をお試しください。");
 
-  onProgress?.("ルートを計算中...");
-  const COURSE_TYPES: CourseType[] = ["nature", "historical", "town"];
-  const results = await Promise.allSettled(
-    COURSE_TYPES.map(type => buildOneCourse(type, spots, lat, lng, durationMin))
-  );
-
-  const courses: Course[] = results
-    .filter((r): r is PromiseFulfilledResult<Course> => r.status === "fulfilled" && r.value !== null)
-    .map(r => r.value);
+  // ③ コースを順次生成: 使用済みスポットを共有し、扇形の回転角をコースごとにずらす
+  //    → 3コースが別方向・別スポットの明確に異なるルートになる
+  const usedIds = new Set<string>();
+  const courses: Course[] = [];
+  for (let i = 0; i < COURSE_TYPES.length; i++) {
+    const type = COURSE_TYPES[i];
+    onProgress?.(TYPE_PROGRESS[type]);
+    const offsetBase = (i * TWO_PI) / COURSE_TYPES.length; // 0°, 120°, 240°
+    try {
+      const course = await buildOneCourse(type, spots, lat, lng, durationMin, usedIds, offsetBase);
+      if (course) courses.push(course);
+    } catch { /* 1コースの失敗は他コースに影響させない */ }
+  }
 
   if (courses.length === 0) throw new Error("コースを生成できませんでした。時間や場所を変えてお試しください。");
-
-  onProgress?.("コースを構築中...");
   return { areaName, courses };
 }

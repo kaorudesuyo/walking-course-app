@@ -6,7 +6,17 @@ export const metadata: Metadata = {
   description: "現在地からあなただけのウォーキングコースを無料提案。",
   manifest: "/manifest.json",
   themeColor: "#0a0a0a",
-  appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "Walking" },
+  icons: {
+    icon: [
+      { url: "/favicon.ico", sizes: "48x48" },
+      { url: "/icons/icon-192.png", type: "image/png", sizes: "192x192" },
+    ],
+    apple: "/apple-touch-icon.png",
+  },
+  appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "Walk" },
+  other: {
+    "mobile-web-app-capable": "yes",
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
