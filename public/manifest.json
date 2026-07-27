@@ -1,7 +1,7 @@
 {
-  "name": "ウォーキングコース提案",
-  "short_name": "Walk",
-  "description": "現在地からあなただけのウォーキングコースを無料提案",
+  "name": "周游 SYUYU — ウォーキングコース提案",
+  "short_name": "周游",
+  "description": "同じ道を戻らず、ぐるりと巡って還る。あなただけのウォーキングコースを無料提案。",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0a0a0a",

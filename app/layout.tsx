@@ -3,8 +3,9 @@ import "./globals.css";
 import AppShell from "@/components/AppShell";
 
 export const metadata: Metadata = {
-  title: "Walking Course — Kaoru Furubayashi",
-  description: "現在地からあなただけのウォーキングコースを無料提案。",
+  // 周游 SYUYU — ぐるっと巡って還るウォーキングコース提案
+  title: "周游 SYUYU — ウォーキングコース提案",
+  description: "現在地から、同じ道を戻らずぐるりと巡って還る。あなただけのウォーキングコースを無料提案する「周游 SYUYU」。",
   manifest: "/manifest.json",
   themeColor: "#0a0a0a",
   icons: {
@@ -15,7 +16,12 @@ export const metadata: Metadata = {
     ],
     apple: "/apple-touch-icon.png",
   },
-  appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "Walk" },
+  appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "周游" },
+  openGraph: {
+    title: "周游 SYUYU — ウォーキングコース提案",
+    description: "同じ道を戻らず、ぐるりと巡って還る散歩を。",
+    type: "website",
+  },
   other: { "mobile-web-app-capable": "yes" },
 };
 
